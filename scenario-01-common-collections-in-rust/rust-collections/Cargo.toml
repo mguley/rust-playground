@@ -1,0 +1,10 @@
+[package]
+name = "collections_demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rustc_version_runtime = "0.3"
+
+[dev-dependencies]
+criterion = "0.8.1"
