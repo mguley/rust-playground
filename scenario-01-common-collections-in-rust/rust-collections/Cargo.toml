@@ -8,3 +8,7 @@ rustc_version_runtime = "0.3"
 
 [dev-dependencies]
 criterion = "0.8.1"
+
+[[bench]]
+name = "collections_benchmark"
+harness = false
