@@ -50,3 +50,23 @@ strengths, performance characteristics, and practical use cases.
 - Priority queues: `BinaryHeap`
 - Performance characteristics and when to use each collection
 - Iterators, capacity management, and the Entry API
+
+---
+
+#### [Scenario 2: Hashing Algorithms for HashMap](./scenario-02-hashing-algorithms-for-hashmap/)
+
+Explore the hash functions available for Rust's `HashMap` and understand their trade-offs.
+This scenario examines the default `SipHash` hasher and five popular alternatives, explaining when each
+is appropriate and how to benchmark them effectively.
+
+**Key Topics:**
+- `SipHash` (default): HashDoS-resistant, security-focused hashing
+- `FxHash`: High-speed hashing for compilers and trusted input
+- `aHash`: Hardware-accelerated hashing with AES-NI support
+- `Foldhash`: Modern hasher with excellent distribution quality
+- `xxHash`: Battle-tested performer for large data and checksums
+- `NoHash`: Zero-overhead "hashing" for well-distributed integer keys
+- Security considerations and HashDoS attack prevention
+- Performance benchmarking with Criterion
+
+**Prerequisites:** Familiarity with `HashMap` from Scenario 1 is recommended.
