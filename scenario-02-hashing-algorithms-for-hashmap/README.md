@@ -12,7 +12,8 @@
 - [Step 5: Foldhash - The Modern Contender](#step-5-foldhash---the-modern-contender)
 - [Step 6: xxHash - The Established Performer](#step-6-xxhash---the-established-performer)
 - [Step 7: NoHash - When Hashing is Unnecessary](#step-7-nohash---when-hashing-is-unnecessary)
-- TODO
+- [Step 8: Security Considerations - HashDoS Attacks](#step-8-security-considerations---hashdos-attacks)
+- [Step 9: Performance Comparison and Benchmarking](#step-9-performance-comparison-and-benchmarking)
 
 ---
 
@@ -3024,3 +3025,1222 @@ However, it's easy to misuse - poorly distributed keys will cause severe perform
 Use it only when you understand your key distribution.
 
 ---
+
+#### Step 8: Security considerations - HashDoS attacks
+
+HashDoS (Hash Denial of Service) attacks exploit a fundamental weakness in hash tables: when many keys hash to the same bucket,
+lookups degrade from `O(1)` to `O(n)`. An attacker who can predict hash values can craft inputs that cause performance degradation.
+
+**Why this matters**: A hash table with `n` items normally handles operations in `O(1)` time.
+But if an attacker can force all `n` items into the same bucket, every operation becomes `O(n)`.
+For a table with 10,000 items, that's a 10,000x slowdown - enough to exhaust server resources with minimal effort.
+
+Create `src/security_examples.rs`
+
+```rust
+//! Security Examples - Understanding HashDoS Attacks
+//!
+//! This module demonstrates why hash function choice matters for security,
+//! and how different hashers protect (or fail to protect) against attacks.
+//!
+//! HashDoS attacks exploit predictable hash functions to cause worst-case
+//! hash table performance. Understanding this threat is essential for
+//! choosing the right hasher for your application.
+//!
+//! IMPORTANT: The examples here are educational.
+
+use ahash::AHasher;
+use nohash_hasher::BuildNoHashHasher;
+use rustc_hash::FxHasher;
+use std::collections::HashMap;
+use std::collections::hash_map::RandomState as StdRandomState;
+use std::hash::{BuildHasher, DefaultHasher, Hash, Hasher};
+use std::time::{Duration, Instant};
+
+fn section(name: &str, what: &str, f: impl FnOnce()) {
+  println!("\n{:=<80}", "");
+  println!("DEMO: {name}");
+  println!("  {what}");
+  println!("{:=<80}", "");
+
+  f();
+}
+
+pub fn run_all() {
+  section(
+    "understanding_hashdos",
+    "What happens when hash collisions are exploited",
+    understanding_hashdos,
+  );
+
+  section(
+    "collision_impact_demonstration",
+    "Measuring the performance impact of hash collisions",
+    collision_impact_demonstration,
+  );
+
+  section(
+    "keyed_vs_unkeyed_hashers",
+    "Why keyed hashers (SipHash, aHash) prevent prediction attacks",
+    keyed_vs_unkeyed_hashers,
+  );
+
+  section(
+    "vulnerable_hasher_demonstration",
+    "Demonstrating why FxHash is vulnerable to HashDoS",
+    vulnerable_hasher_demonstration,
+  );
+
+  section(
+    "secure_hasher_demonstration",
+    "How SipHash and aHash protect against HashDoS",
+    secure_hasher_demonstration,
+  );
+}
+
+/// Explains the mechanics of HashDoS attacks.
+///
+/// When an attacker can predict hash values, they can craft inputs
+/// that all hash to the same bucket, turning O(1) operations into O(n).
+pub fn understanding_hashdos() {
+  println!("\n  Understanding HashDoS Attacks:");
+
+  println!(
+    "
+    Hash tables achieve O(1) performance by distributing items across buckets:
+
+    Normal distribution (random keys):
+    ┌─────────────────────────────────────────────────────────────┐
+    │ Bucket 0: [item_a]                                          │
+    │ Bucket 1: [item_b, item_c]                                  │
+    │ Bucket 2: [item_d]                                          │
+    │ Bucket 3: [item_e]                                          │
+    │ Bucket 4: [item_f, item_g]                                  │
+    │ ...                                                         │
+    └─────────────────────────────────────────────────────────────┘
+    Lookup time: O(1) average - just hash and check one bucket
+
+    HashDoS attack (crafted keys all collide):
+    ┌─────────────────────────────────────────────────────────────┐
+    │ Bucket 0: [item_a, item_b, item_c, item_d, item_e, ...]     │
+    │ Bucket 1: empty                                             │
+    │ Bucket 2: empty                                             │
+    │ Bucket 3: empty                                             │
+    │ ...                                                         │
+    └─────────────────────────────────────────────────────────────┘
+    Lookup time: O(n) - must scan entire chain!
+    "
+  );
+
+  println!("    Impact:");
+  println!("      - A single malicious HTTP request can exhaust server CPU");
+  println!("      - Attack requires minimal bandwidth (small payload, huge impact)");
+  println!("      - Led to CVEs and emergency patches across the industry");
+}
+
+/// Demonstrates the performance impact of hash collisions.
+///
+/// This simulation shows how performance degrades when items cluster
+/// in the same bucket versus being well-distributed.
+pub fn collision_impact_demonstration() {
+  println!("\n  Collision Impact Demonstration:");
+
+  // We'll simulate the effect of collisions by comparing lookup times
+  // in a well-distributed map versus a poorly-distributed one.
+
+  // For this demonstration, we use NoHash which lets us control distribution.
+  // Keys that are multiples of the table size will cluster badly.
+
+  let num_items: usize = 5_000;
+  let num_lookups: usize = 500;
+
+  // Well-distributed keys (sequential integers)
+  let good_keys: Vec<u64> = (0..num_items as u64).collect();
+
+  // Poorly-distributed keys (all multiples of 1024 - will cluster)
+  // When table size is a power of 2, these keys hit the same buckets
+  let bad_keys: Vec<u64> = (0..num_items as u64).map(|i| i * 1024).collect();
+
+  // Build maps with NoHash (which uses keys directly as hashes)
+  let mut good_map: HashMap<u64, i32, BuildNoHashHasher<u64>> = HashMap::default();
+  let mut bad_map: HashMap<u64, i32, BuildNoHashHasher<u64>> = HashMap::default();
+
+  for &key in &good_keys {
+    good_map.insert(key, 1);
+  }
+  for &key in &bad_keys {
+    bad_map.insert(key, 1);
+  }
+
+  // Measure lookup performance
+  let start: Instant = Instant::now();
+  for _ in 0..num_lookups {
+    for &key in &good_keys {
+      let _ = std::hint::black_box(good_map.get(&key));
+    }
+  }
+  let good_time: Duration = start.elapsed();
+
+  let start: Instant = Instant::now();
+  for _ in 0..num_lookups {
+    for &key in &bad_keys {
+      let _ = std::hint::black_box(bad_map.get(&key));
+    }
+  }
+  let bad_time: Duration = start.elapsed();
+
+  println!(
+    "    {} items, {} lookup iterations each:",
+    num_items, num_lookups
+  );
+  println!("      Well-distributed keys: {:?}", good_time);
+  println!("      Clustered keys:        {:?}", bad_time);
+
+  if bad_time > good_time {
+    let slowdown: f64 = bad_time.as_nanos() as f64 / good_time.as_nanos() as f64;
+    println!("      Clustering caused {:.1}x slowdown!", slowdown);
+  }
+
+  println!();
+  println!("    This demonstrates why key distribution matters.");
+  println!("    An attacker who can control keys can exploit this.");
+}
+
+/// Explains the difference between keyed and unkeyed hashers.
+///
+/// Keyed hashers use a random seed, making hash values unpredictable
+/// to attackers. Unkeyed hashers always produce the same output for
+/// the same input, making them vulnerable to prediction attacks.
+pub fn keyed_vs_unkeyed_hashers() {
+  println!("\n  Keyed vs Unkeyed Hashers:");
+
+  println!(
+    "
+    UNKEYED HASHERS:
+    ┌─────────────────────────────────────────────────────────────┐
+    │ hash(\"attack_key\") = 0x12345678  (always the same!)       │
+    │                                                             │
+    │ Attacker knows: If I send these specific keys, they will    │
+    │ all hash to the same bucket in ANY program                  │
+    └─────────────────────────────────────────────────────────────┘
+
+    KEYED HASHERS:
+    ┌─────────────────────────────────────────────────────────────┐
+    │ Program A (random key 0xABCD...):                           │
+    │   hash(\"attack_key\") = 0x11111111                         │
+    │                                                             │
+    │ Program B (different random key 0x9876...):                 │
+    │   hash(\"attack_key\") = 0x99999999                         │
+    │                                                             │
+    │ Attacker doesn't know the key, can't predict hash values!   │
+    └─────────────────────────────────────────────────────────────┘
+    "
+  );
+
+  // Demonstrate with actual hashers
+  println!("    Demonstration with real hashers:");
+
+  let value: &str = "test_input";
+
+  // FxHash - unkeyed, deterministic
+  let fx_hash1: u64 = {
+    let mut h: FxHasher = FxHasher::default();
+    value.hash(&mut h);
+    h.finish()
+  };
+  let fx_hash2: u64 = {
+    let mut h: FxHasher = FxHasher::default();
+    value.hash(&mut h);
+    h.finish()
+  };
+
+  println!("      FxHash (unkeyed):");
+  println!("        First call:  {:016x}", fx_hash1);
+  println!("        Second call: {:016x}", fx_hash2);
+  println!("        Same? {} - PREDICTABLE!", fx_hash1 == fx_hash2);
+
+  // SipHash - keyed, random per instance
+  let sip_state1: StdRandomState = StdRandomState::new();
+  let sip_state2: StdRandomState = StdRandomState::new();
+
+  let sip_hash1: u64 = {
+    let mut h: DefaultHasher = sip_state1.build_hasher();
+    value.hash(&mut h);
+    h.finish()
+  };
+  let sip_hash2: u64 = {
+    let mut h: DefaultHasher = sip_state2.build_hasher();
+    value.hash(&mut h);
+    h.finish()
+  };
+
+  println!();
+  println!("      SipHash (keyed with random seed):");
+  println!("        State 1: {:016x}", sip_hash1);
+  println!("        State 2: {:016x}", sip_hash2);
+  println!("        Same? {} - UNPREDICTABLE!", sip_hash1 == sip_hash2);
+}
+
+/// Demonstrates why FxHash is vulnerable to HashDoS.
+///
+/// Because FxHash is deterministic, an attacker can pre-compute
+/// colliding keys offline and use them against any target.
+pub fn vulnerable_hasher_demonstration() {
+  println!("\n  FxHash Vulnerability Demonstration:");
+
+  println!("    FxHash produces deterministic, predictable hashes.");
+  println!("    An attacker can find colliding keys offline:");
+
+  // Show that FxHash is completely predictable
+  let test_keys: [&str; 5] = ["key1", "key2", "key3", "key4", "key5"];
+
+  println!();
+  println!("    FxHash values (same on every run, every machine):");
+  for key in test_keys {
+    let mut h: FxHasher = FxHasher::default();
+    key.hash(&mut h);
+    println!("      hash({:?}) = {:016x}", key, h.finish());
+  }
+}
+
+/// Demonstrates how SipHash and aHash protect against HashDoS.
+///
+/// These hashers use random seeds, making it computationally infeasible
+/// for attackers to predict hash values or find collisions.
+pub fn secure_hasher_demonstration() {
+  println!("\n  Secure Hasher Protection:");
+
+  println!("    SipHash and aHash use random seeds from the OS.");
+  println!("    Even if an attacker knows the algorithm, they can't");
+  println!("    predict hash values without knowing the secret seed.");
+
+  // Show that each HashMap gets different hash values
+  let key: &str = "potentially_malicious_input";
+
+  // SipHash - each HashMap has its own random seed
+  let map1: HashMap<&str, i32> = HashMap::new();
+  let map2: HashMap<&str, i32> = HashMap::new();
+
+  let hash1: u64 = {
+    let mut h: DefaultHasher = map1.hasher().build_hasher();
+    key.hash(&mut h);
+    h.finish()
+  };
+  let hash2: u64 = {
+    let mut h: DefaultHasher = map2.hasher().build_hasher();
+    key.hash(&mut h);
+    h.finish()
+  };
+
+  println!();
+  println!("    SipHash (default HashMap):");
+  println!("      Map 1 hash: {:016x}", hash1);
+  println!("      Map 2 hash: {:016x}", hash2);
+  println!(
+    "      Different? {} - each map has its own seed!",
+    hash1 != hash2
+  );
+
+  // aHash - same protection
+  let amap1: ahash::AHashMap<&str, i32> = ahash::AHashMap::new();
+  let amap2: ahash::AHashMap<&str, i32> = ahash::AHashMap::new();
+
+  let ahash1: u64 = {
+    let mut h: AHasher = amap1.hasher().build_hasher();
+    key.hash(&mut h);
+    h.finish()
+  };
+  let ahash2: u64 = {
+    let mut h: AHasher = amap2.hasher().build_hasher();
+    key.hash(&mut h);
+    h.finish()
+  };
+
+  println!();
+  println!("    aHash:");
+  println!("      Map 1 hash: {:016x}", ahash1);
+  println!("      Map 2 hash: {:016x}", ahash2);
+  println!(
+    "      Different? {} - also uses random seeds!",
+    ahash1 != ahash2
+  );
+
+  println!();
+  println!("    Why this protects you:");
+  println!("      - Attacker can't pre-compute collisions (unknown seed)");
+  println!("      - Even if they crash one HashMap, they need new keys for others");
+  println!("      - Brute-forcing collisions is computationally infeasible");
+}
+```
+
+Update `src/main.rs` to include security examples:
+
+```rust
+// src/main.rs
+
+mod security_examples;
+
+use security_examples::run_all as security_run_all;
+
+fn main() {
+
+    security_run_all();
+}
+```
+
+Run the security examples
+
+```bash
+cargo run
+```
+
+---
+
+#### Step 9: Performance comparison and benchmarking
+
+Now let's create benchmarks to compare all the hashers we've discussed.
+
+`Setting up Criterion`
+
+First, ensure your `Cargo.toml` includes Criterion as a dev dependency and configures the benchmark harness:
+
+```toml
+[package]
+name = "hashing_demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rustc_version_runtime = "0.3"
+
+# Alternative hashers we'll explore
+rustc-hash = "2.1.1"      # FxHash - used in rustc compiler
+ahash = "0.8.12"          # aHash - fast with DOS resistance
+foldhash = "0.2.0"        # Foldhash - modern, quality-focused
+twox-hash = "2.1.2"       # xxHash - established high-speed hasher
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }    # Alternative xxHash implementation
+nohash-hasher = "0.2.0"   # NoHash - for integer keys
+
+# For generating random test data
+rand = "0.9.2"
+
+[dev-dependencies]
+criterion = "0.8.1"
+
+[[bench]]
+name = "hasher_benchmarks"
+harness = false
+```
+
+Clean up `src/main.rs` file (to avoid unnecessary warnings):
+
+```rust
+use rustc_version_runtime;
+
+fn main() {
+    println!("Hashing Algorithms for HashMap - Demo");
+    println!("Compiled with: {:?}", rustc_version_runtime::version());
+}
+```
+
+Create the benchmark file at `benches/hasher_benchmarks.rs`:
+
+```rust
+//! benches/hasher_benchmarks.rs
+//!
+//! Benchmarks for comparing hash function performance.
+//!
+//! These benchmarks measure:
+//!   1. Raw hashing throughput (bytes/second)
+//!   2. HashMap insertion performance
+//!   3. HashMap lookup performance
+//!   4. Performance across different key sizes
+//!   5. Performance with different key types
+//!
+//! To run these benchmarks:
+//!   cargo bench
+//!
+//! To run a specific benchmark group:
+//!   cargo bench -- Hashing
+//!   cargo bench -- HashMap_Insert
+//!   cargo bench -- HashMap_Lookup
+//!
+//! Results are saved to target/criterion/ with HTML reports.
+
+use criterion::measurement::WallTime;
+use criterion::{
+  BenchmarkGroup, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
+};
+use std::collections::HashMap;
+use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher, Hash, Hasher};
+use std::hint::black_box;
+
+// Import all the hashers we're comparing
+use ahash::{AHashMap, AHasher, RandomState as AHashRandomState};
+use foldhash::fast::{FoldHasher, RandomState as FoldRandomState};
+use foldhash::{HashMap as FoldHashMap, HashMapExt};
+use nohash_hasher::{BuildNoHashHasher, IntMap, NoHashHasher};
+use rustc_hash::{FxHashMap, FxHasher};
+use std::collections::hash_map::RandomState as StdRandomState;
+use twox_hash::XxHash64;
+use xxhash_rust::xxh3::xxh3_64;
+
+// ============================================================================
+// RAW HASHING BENCHMARKS
+// ============================================================================
+// Measures the raw throughput of each hash function without HashMap overhead.
+// This isolates the hash function performance from table operations.
+
+fn bench_raw_hashing(c: &mut Criterion) {
+  let mut group: BenchmarkGroup<WallTime> = c.benchmark_group("Raw_Hashing");
+
+  // Test with different key sizes to see how hashers scale
+  for size in [8, 64, 256, 1024, 4096] {
+    let data: Vec<u8> = (0..size).map(|i| i as u8).collect();
+    group.throughput(Throughput::Bytes(size as u64));
+
+    // SipHash (default)
+    group.bench_with_input(BenchmarkId::new("SipHash", size), &data, |b, data| {
+      let state: StdRandomState = StdRandomState::new();
+      b.iter(|| {
+        let mut h: DefaultHasher = state.build_hasher();
+        data.hash(&mut h);
+        black_box(h.finish())
+      })
+    });
+
+    // FxHash
+    group.bench_with_input(BenchmarkId::new("FxHash", size), &data, |b, data| {
+      let state: BuildHasherDefault<FxHasher> = BuildHasherDefault::default();
+      b.iter(|| {
+        let mut h: FxHasher = state.build_hasher();
+        data.hash(&mut h);
+        black_box(h.finish())
+      })
+    });
+
+    // aHash
+    group.bench_with_input(BenchmarkId::new("aHash", size), &data, |b, data| {
+      let state: AHashRandomState = AHashRandomState::new();
+      b.iter(|| {
+        let mut h: AHasher = state.build_hasher();
+        data.hash(&mut h);
+        black_box(h.finish())
+      })
+    });
+
+    // Foldhash
+    group.bench_with_input(BenchmarkId::new("Foldhash", size), &data, |b, data| {
+      let state: FoldRandomState = FoldRandomState::default();
+      b.iter(|| {
+        let mut h: FoldHasher = state.build_hasher();
+        data.hash(&mut h);
+        black_box(h.finish())
+      })
+    });
+
+    // xxHash64 (twox-hash)
+    group.bench_with_input(BenchmarkId::new("xxHash64", size), &data, |b, data| {
+      let state: BuildHasherDefault<XxHash64> = BuildHasherDefault::default();
+      b.iter(|| {
+        let mut h = state.build_hasher();
+        data.hash(&mut h);
+        black_box(h.finish())
+      })
+    });
+
+    // xxHash3 (xxhash-rust) - direct API for comparison
+    group.bench_with_input(BenchmarkId::new("xxHash3", size), &data, |b, data| {
+      b.iter(|| black_box(xxh3_64(data)))
+    });
+  }
+
+  group.finish();
+}
+
+// ============================================================================
+// INTEGER KEY BENCHMARKS
+// ============================================================================
+// Measures performance with integer keys - the ideal case for NoHash.
+
+fn bench_integer_hashing(c: &mut Criterion) {
+  let mut group: BenchmarkGroup<WallTime> = c.benchmark_group("Integer_Hashing");
+
+  let iterations: u64 = 100_000;
+  group.throughput(Throughput::Elements(iterations));
+
+  // SipHash
+  group.bench_function("SipHash", |b| {
+    let state: StdRandomState = StdRandomState::new();
+    b.iter(|| {
+      for i in 0u64..iterations {
+        let mut h: DefaultHasher = state.build_hasher();
+        i.hash(&mut h);
+        black_box(h.finish());
+      }
+    })
+  });
+
+  // FxHash
+  group.bench_function("FxHash", |b| {
+    let state: BuildHasherDefault<FxHasher> = BuildHasherDefault::default();
+    b.iter(|| {
+      for i in 0u64..iterations {
+        let mut h: FxHasher = state.build_hasher();
+        i.hash(&mut h);
+        black_box(h.finish());
+      }
+    })
+  });
+
+  // aHash
+  group.bench_function("aHash", |b| {
+    let state: AHashRandomState = AHashRandomState::new();
+    b.iter(|| {
+      for i in 0u64..iterations {
+        let mut h: AHasher = state.build_hasher();
+        i.hash(&mut h);
+        black_box(h.finish());
+      }
+    })
+  });
+
+  // Foldhash
+  group.bench_function("Foldhash", |b| {
+    let state: FoldRandomState = FoldRandomState::default();
+    b.iter(|| {
+      for i in 0u64..iterations {
+        let mut h: FoldHasher = state.build_hasher();
+        i.hash(&mut h);
+        black_box(h.finish());
+      }
+    })
+  });
+
+  // NoHash
+  group.bench_function("NoHash", |b| {
+    let state: BuildNoHashHasher<u64> = BuildNoHashHasher::default();
+    b.iter(|| {
+      for i in 0u64..iterations {
+        let mut h: NoHashHasher<u64> = state.build_hasher();
+        i.hash(&mut h);
+        black_box(h.finish());
+      }
+    })
+  });
+
+  group.finish();
+}
+
+// ============================================================================
+// HASHMAP INSERTION BENCHMARKS
+// ============================================================================
+// Measures the full cost of inserting items into a HashMap,
+// including hashing, bucket lookup, and memory allocation.
+
+fn bench_hashmap_insert(c: &mut Criterion) {
+  let mut group: BenchmarkGroup<WallTime> = c.benchmark_group("HashMap_Insert");
+
+  for size in [1_000, 10_000, 100_000] {
+    group.throughput(Throughput::Elements(size as u64));
+
+    // Generate test keys
+    let string_keys: Vec<String> = (0..size).map(|i| format!("key_{:08}", i)).collect();
+    let int_keys: Vec<u64> = (0..size as u64).collect();
+
+    // === String keys ===
+
+    // SipHash (default HashMap)
+    group.bench_with_input(
+      BenchmarkId::new("SipHash_String", size),
+      &string_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut map: HashMap<String, i32> = HashMap::with_capacity(size);
+          for (i, key) in keys.iter().enumerate() {
+            map.insert(key.clone(), i as i32);
+          }
+          map
+        })
+      },
+    );
+
+    // FxHash
+    group.bench_with_input(
+      BenchmarkId::new("FxHash_String", size),
+      &string_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut map: FxHashMap<String, i32> = FxHashMap::default();
+          map.reserve(size);
+          for (i, key) in keys.iter().enumerate() {
+            map.insert(key.clone(), i as i32);
+          }
+          map
+        })
+      },
+    );
+
+    // aHash
+    group.bench_with_input(
+      BenchmarkId::new("aHash_String", size),
+      &string_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut map: AHashMap<String, i32> = AHashMap::with_capacity(size);
+          for (i, key) in keys.iter().enumerate() {
+            map.insert(key.clone(), i as i32);
+          }
+          map
+        })
+      },
+    );
+
+    // Foldhash
+    group.bench_with_input(
+      BenchmarkId::new("Foldhash_String", size),
+      &string_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut map: FoldHashMap<String, i32> = FoldHashMap::with_capacity(size);
+          for (i, key) in keys.iter().enumerate() {
+            map.insert(key.clone(), i as i32);
+          }
+          map
+        })
+      },
+    );
+
+    // === Integer keys ===
+
+    // SipHash
+    group.bench_with_input(
+      BenchmarkId::new("SipHash_Int", size),
+      &int_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut map: HashMap<u64, i32> = HashMap::with_capacity(size);
+          for (i, &key) in keys.iter().enumerate() {
+            map.insert(key, i as i32);
+          }
+          map
+        })
+      },
+    );
+
+    // FxHash
+    group.bench_with_input(
+      BenchmarkId::new("FxHash_Int", size),
+      &int_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut map: FxHashMap<u64, i32> = FxHashMap::default();
+          map.reserve(size);
+          for (i, &key) in keys.iter().enumerate() {
+            map.insert(key, i as i32);
+          }
+          map
+        })
+      },
+    );
+
+    // NoHash (integer keys only)
+    group.bench_with_input(
+      BenchmarkId::new("NoHash_Int", size),
+      &int_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut map: IntMap<u64, i32> = IntMap::default();
+          map.reserve(size);
+          for (i, &key) in keys.iter().enumerate() {
+            map.insert(key, i as i32);
+          }
+          map
+        })
+      },
+    );
+  }
+
+  group.finish();
+}
+
+// ============================================================================
+// HASHMAP LOOKUP BENCHMARKS
+// ============================================================================
+// Measures lookup performance with pre-populated HashMaps.
+// This isolates lookup cost from insertion/allocation.
+
+fn bench_hashmap_lookup(c: &mut Criterion) {
+  let mut group: BenchmarkGroup<WallTime> = c.benchmark_group("HashMap_Lookup");
+
+  for size in [1_000, 10_000, 100_000] {
+    // Pre-generate keys
+    let string_keys: Vec<String> = (0..size).map(|i| format!("key_{:08}", i)).collect();
+    let int_keys: Vec<u64> = (0..size as u64).collect();
+
+    // Pre-build all maps
+    let sip_string: HashMap<String, i32> = string_keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.clone(), i as i32))
+            .collect();
+    let fx_string: FxHashMap<String, i32> = string_keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.clone(), i as i32))
+            .collect();
+    let ahash_string: AHashMap<String, i32> = string_keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.clone(), i as i32))
+            .collect();
+    let fold_string: FoldHashMap<String, i32> = string_keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.clone(), i as i32))
+            .collect();
+
+    let sip_int: HashMap<u64, i32> = int_keys
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i as i32))
+            .collect();
+    let fx_int: FxHashMap<u64, i32> = int_keys
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i as i32))
+            .collect();
+    let nohash_int: IntMap<u64, i32> = int_keys
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i as i32))
+            .collect();
+
+    // === String key lookups ===
+
+    group.bench_with_input(
+      BenchmarkId::new("SipHash_String", size),
+      &string_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut sum: i32 = 0;
+          for key in keys {
+            if let Some(&v) = sip_string.get(key) {
+              sum += v;
+            }
+          }
+          black_box(sum)
+        })
+      },
+    );
+
+    group.bench_with_input(
+      BenchmarkId::new("FxHash_String", size),
+      &string_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut sum: i32 = 0;
+          for key in keys {
+            if let Some(&v) = fx_string.get(key) {
+              sum += v;
+            }
+          }
+          black_box(sum)
+        })
+      },
+    );
+
+    group.bench_with_input(
+      BenchmarkId::new("aHash_String", size),
+      &string_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut sum: i32 = 0;
+          for key in keys {
+            if let Some(&v) = ahash_string.get(key) {
+              sum += v;
+            }
+          }
+          black_box(sum)
+        })
+      },
+    );
+
+    group.bench_with_input(
+      BenchmarkId::new("Foldhash_String", size),
+      &string_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut sum: i32 = 0;
+          for key in keys {
+            if let Some(&v) = fold_string.get(key) {
+              sum += v;
+            }
+          }
+          black_box(sum)
+        })
+      },
+    );
+
+    // === Integer key lookups ===
+
+    group.bench_with_input(
+      BenchmarkId::new("SipHash_Int", size),
+      &int_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut sum: i32 = 0;
+          for &key in keys {
+            if let Some(&v) = sip_int.get(&key) {
+              sum += v;
+            }
+          }
+          black_box(sum)
+        })
+      },
+    );
+
+    group.bench_with_input(
+      BenchmarkId::new("FxHash_Int", size),
+      &int_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut sum: i32 = 0;
+          for &key in keys {
+            if let Some(&v) = fx_int.get(&key) {
+              sum += v;
+            }
+          }
+          black_box(sum)
+        })
+      },
+    );
+
+    group.bench_with_input(
+      BenchmarkId::new("NoHash_Int", size),
+      &int_keys,
+      |b, keys| {
+        b.iter(|| {
+          let mut sum: i32 = 0;
+          for &key in keys {
+            if let Some(&v) = nohash_int.get(&key) {
+              sum += v;
+            }
+          }
+          black_box(sum)
+        })
+      },
+    );
+  }
+
+  group.finish();
+}
+
+// ============================================================================
+// ENTRY API BENCHMARKS
+// ============================================================================
+// Measures the common pattern of "get or insert" using the Entry API.
+
+fn bench_entry_api(c: &mut Criterion) {
+  let mut group: BenchmarkGroup<WallTime> = c.benchmark_group("Entry_API");
+
+  // Simulate word counting - a common Entry API use case
+  let words: Vec<&str> = vec![
+    "the", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog", "the", "fox", "is",
+    "quick", "and", "the", "dog", "is", "lazy",
+  ];
+  let text: Vec<&str> = (0..10_000).map(|i| words[i % words.len()]).collect();
+
+  // SipHash
+  group.bench_function("SipHash", |b| {
+    b.iter(|| {
+      let mut counts: HashMap<&str, i32> = HashMap::new();
+      for &word in &text {
+        *counts.entry(word).or_insert(0) += 1;
+      }
+      counts
+    })
+  });
+
+  // FxHash
+  group.bench_function("FxHash", |b| {
+    b.iter(|| {
+      let mut counts: FxHashMap<&str, i32> = FxHashMap::default();
+      for &word in &text {
+        *counts.entry(word).or_insert(0) += 1;
+      }
+      counts
+    })
+  });
+
+  // aHash
+  group.bench_function("aHash", |b| {
+    b.iter(|| {
+      let mut counts: AHashMap<&str, i32> = AHashMap::new();
+      for &word in &text {
+        *counts.entry(word).or_insert(0) += 1;
+      }
+      counts
+    })
+  });
+
+  // Foldhash
+  group.bench_function("Foldhash", |b| {
+    b.iter(|| {
+      let mut counts: FoldHashMap<&str, i32> = FoldHashMap::new();
+      for &word in &text {
+        *counts.entry(word).or_insert(0) += 1;
+      }
+      counts
+    })
+  });
+
+  group.finish();
+}
+
+// ============================================================================
+// LARGE KEY BENCHMARKS
+// ============================================================================
+// Tests performance with large keys where xxHash should excel.
+
+fn bench_large_keys(c: &mut Criterion) {
+  let mut group: BenchmarkGroup<WallTime> = c.benchmark_group("Large_Keys");
+
+  // Create large string keys (simulating file paths, URLs, etc.)
+  let large_keys: Vec<String> = (0..1_000)
+          .map(|i| format!("/very/long/path/to/some/resource/item_{:08}/data.json", i))
+          .collect();
+
+  group.throughput(Throughput::Elements(large_keys.len() as u64));
+
+  // SipHash
+  group.bench_function("SipHash", |b| {
+    b.iter(|| {
+      let mut map: HashMap<String, i32> = HashMap::new();
+      for (i, key) in large_keys.iter().enumerate() {
+        map.insert(key.clone(), i as i32);
+      }
+      map
+    })
+  });
+
+  // FxHash
+  group.bench_function("FxHash", |b| {
+    b.iter(|| {
+      let mut map: FxHashMap<String, i32> = FxHashMap::default();
+      for (i, key) in large_keys.iter().enumerate() {
+        map.insert(key.clone(), i as i32);
+      }
+      map
+    })
+  });
+
+  // aHash
+  group.bench_function("aHash", |b| {
+    b.iter(|| {
+      let mut map: AHashMap<String, i32> = AHashMap::new();
+      for (i, key) in large_keys.iter().enumerate() {
+        map.insert(key.clone(), i as i32);
+      }
+      map
+    })
+  });
+
+  // Foldhash
+  group.bench_function("Foldhash", |b| {
+    b.iter(|| {
+      let mut map: FoldHashMap<String, i32> = FoldHashMap::new();
+      for (i, key) in large_keys.iter().enumerate() {
+        map.insert(key.clone(), i as i32);
+      }
+      map
+    })
+  });
+
+  group.finish();
+}
+
+// ============================================================================
+// CRITERION CONFIGURATION
+// ============================================================================
+
+criterion_group!(
+    benches,
+    bench_raw_hashing,
+    bench_integer_hashing,
+    bench_hashmap_insert,
+    bench_hashmap_lookup,
+    bench_entry_api,
+    bench_large_keys,
+);
+
+criterion_main!(benches);
+```
+
+#### Running the benchmarks
+
+To run all benchmarks:
+
+```bash
+cargo bench
+```
+
+To run a specific benchmark group:
+
+```bash
+cargo bench -- Raw_Hashing
+cargo bench -- Integer_Hashing
+cargo bench -- HashMap_Insert
+cargo bench -- HashMap_Lookup
+cargo bench -- Entry_API
+cargo bench -- Large_Keys
+```
+
+#### Benchmark results analysis and summary
+
+After running all the benchmarks, we can analyze the results to understand how each hasher performs across different workloads. 
+The following sections break down each benchmark and provide consolidated summary tables to guide your hasher selection.
+
+##### Raw hashing benchmark analysis
+
+The raw hashing benchmark measures pure hash function throughput without any HashMap overhead. This isolates the cost of the hash computation itself across different input sizes.
+
+For **small keys (8 bytes)**, `FxHash` and `Foldhash` are the clear winners at around 13 GiB/s throughput, while `SipHash` and `xxHash64` lag behind at roughly 1 GiB/s. 
+This makes sense because `SipHash` and `xxHash64` have more complex initialization and finalization steps that dominate when the actual data to hash is tiny.
+
+For **large keys (4096 bytes)**, the picture changes dramatically. `Foldhash` leads at 44.66 GiB/s, followed by `xxHash3` at 30.80 GiB/s. 
+`SipHash` remains the slowest at 5.94 GiB/s. This reveals that `Foldhash's` "folding multiply" technique scales exceptionally well with data size.
+
+##### Integer hashing benchmark analysis
+
+This benchmark specifically tests the common case of hashing integer keys, which is important for entity IDs, database keys, and similar use cases.
+
+| Hasher   | Time (100K iterations) | Throughput   | Relative to SipHash |
+|----------|------------------------|--------------|---------------------|
+| NoHash   | 14.60 µs               | 6.85 Gelem/s | **26.7× faster**    |
+| FxHash   | 21.55 µs               | 4.64 Gelem/s | **18.1× faster**    |
+| Foldhash | 28.48 µs               | 3.51 Gelem/s | **13.7× faster**    |
+| aHash    | 56.92 µs               | 1.76 Gelem/s | **6.9× faster**     |
+| SipHash  | 390.36 µs              | 256 Melem/s  | 1× (baseline)       |
+
+`NoHash's` dominance here is expected since it performs essentially no computation, just using the integer value directly. 
+`FxHash's` strong showing reflects its origins as a compiler hasher optimized for symbol table lookups (which are often integers or short strings).
+
+##### HashMap insert benchmark analysis
+
+This measures the full cost of insertion including hashing, bucket lookup, and memory operations.
+
+**String Keys (10,000 entries)**
+
+| Hasher   | Time       | Throughput    | Notes                  |
+|----------|------------|---------------|------------------------|
+| FxHash   | 492.56 µs  | 20.30 Melem/s | Fastest                |
+| Foldhash | 505.95 µs  | 19.77 Melem/s | Very close second      |
+| aHash    | 532.89 µs  | 18.77 Melem/s | Good balance           |
+| SipHash  | 583.91 µs  | 17.13 Melem/s | Slowest but secure     |
+
+**Integer Keys (10,000 entries)**
+
+| Hasher  | Time      | Throughput     | vs SipHash       |
+|---------|-----------|----------------|------------------|
+| FxHash  | 31.30 µs  | 319.50 Melem/s | **3.2× faster**  |
+| NoHash  | 44.81 µs  | 223.17 Melem/s | **2.3× faster**  |
+| SipHash | 101.24 µs | 98.78 Melem/s  | 1× baseline      |
+
+An interesting finding here is that `FxHash` actually beats `NoHash` for integer insertion at this scale. 
+This likely reflects the fact that while `NoHash` has zero hashing cost, `FxHash's` simple multiply-xor operation produces slightly better bucket distribution,
+reducing collision-handling overhead in the HashMap itself.
+
+##### HashMap lookup benchmark analysis
+
+Lookup performance is often the most critical metric since many applications read far more than they write.
+
+**String Keys (100,000 entries)**
+
+| Hasher   | Lookup Time | vs SipHash      |
+|----------|-------------|-----------------|
+| Foldhash | 851.43 µs   | **2.4× faster** |
+| FxHash   | 927.16 µs   | **2.2× faster** |
+| aHash    | 1.05 ms     | **2.0× faster** |
+| SipHash  | 2.08 ms     | 1× baseline     |
+
+**Integer Keys (100,000 entries)**
+
+| Hasher  | Lookup Time | vs SipHash      |
+|---------|-------------|-----------------|
+| NoHash  | 119.15 µs   | **9.9× faster** |
+| FxHash  | 219.92 µs   | **5.4× faster** |
+| SipHash | 1.18 ms     | 1× baseline     |
+
+The lookup results show even more dramatic differences than insertion because lookup is a "pure" hash operation without memory allocation overhead. 
+`NoHash's` nearly 10× speedup for integer lookups demonstrates why it's so valuable for ECS systems and other integer-keyed workloads.
+
+##### Entry API benchmark analysis
+
+The Entry API pattern (commonly used for counting and accumulation) shows similar trends.
+
+| Hasher   | Time (10K word counting) | vs SipHash      |
+|----------|--------------------------|-----------------|
+| FxHash   | 40.93 µs                 | **2.4× faster** |
+| Foldhash | 41.24 µs                 | **2.4× faster** |
+| aHash    | 47.09 µs                 | **2.1× faster** |
+| SipHash  | 97.20 µs                 | 1× baseline     |
+
+##### Large keys benchmark analysis
+
+Testing with longer string keys (~60 bytes each, simulating file paths or URLs).
+
+| Hasher   | Time (1000 inserts) | Throughput    | vs SipHash      |
+|----------|---------------------|---------------|-----------------|
+| FxHash   | 48.32 µs            | 20.70 Melem/s | **1.6× faster** |
+| Foldhash | 53.25 µs            | 18.78 Melem/s | **1.4× faster** |
+| aHash    | 57.75 µs            | 17.32 Melem/s | **1.3× faster** |
+| SipHash  | 75.30 µs            | 13.28 Melem/s | 1× baseline     |
+
+---
+
+##### Summary table
+
+Here is the master summary table that consolidates all the benchmark findings:
+
+| Hasher      | Small Key Hashing | Large Key Hashing | Integer HashMap | String HashMap | Security          | Best Use Case                    |
+|-------------|-------------------|-------------------|-----------------|----------------|-------------------|----------------------------------|
+| **SipHash** | 1× (baseline)     | 1× (baseline)     | 1× (baseline)   | 1× (baseline)  | HashDoS resistant | Untrusted input, default choice  |
+| **FxHash**  | ~13× faster       | ~4× faster        | ~3–5× faster    | ~2× faster     | Not secure      | Compilers, trusted internal data |
+| **aHash**   | ~11× faster       | ~3× faster        | ~2× faster      | ~2× faster     | HashDoS resistant | General purpose with speed needs |
+| **Foldhash**| ~13× faster       | ~8× faster        | ~2–3× faster    | ~2.4× faster   | Minimal        | Modern general purpose           |
+| **xxHash3** | ~10× faster       | ~5× faster        | N/A             | N/A            | Not secure      | Large data checksums, files      |
+| **NoHash**  | ~27× faster       | N/A               | ~5–10× faster   | N/A            | Not secure      | Integer keys only, ECS, caches   |
+
+##### Raw throughput summary (GiB/s)
+
+| Hasher   | 8 bytes | 64 bytes | 256 bytes | 1024 bytes | 4096 bytes |
+|----------|---------|----------|-----------|------------|------------|
+| SipHash  | 1.0     | 3.9      | 5.3       | 5.8        | 5.9        |
+| FxHash   | 13.3    | 25.4     | 29.2      | 26.4       | 23.2       |
+| aHash    | 9.1     | 23.9     | 23.2      | 18.9       | 16.2       |
+| Foldhash | 13.5    | 21.9     | 35.0      | 40.8       | **44.7**   |
+| xxHash64 | 1.0     | 5.4      | 11.6      | 16.0       | 16.9       |
+| xxHash3  | 8.6     | **30.4** | 19.5      | 28.8       | 30.8       |
+
+---
+
+##### Key takeaways
+
+**For applications processing untrusted input** (web servers, APIs, anything exposed to the internet), stick with `SipHash` (the default) or `aHash`. 
+The performance difference is rarely noticeable in real applications, and the security protection is invaluable.
+
+**For compilers, interpreters, and internal tooling** where you control all input, `FxHash` provides the best overall performance. This is why the Rust compiler itself uses it.
+
+**For integer-keyed data structures** like entity component systems, caches with numeric IDs, or database indexes, `NoHash` eliminates hashing overhead entirely.
+Just ensure your keys are reasonably distributed (sequential integers work perfectly).
+
+**For hashing large data** like file contents, network packets, or large strings, `Foldhash` and `xxHash3` both excel. 
+`Foldhash` has a slight edge in pure throughput, while `xxHash3` offers battle-tested reliability and wider ecosystem support.
+
+**For modern general-purpose use**, `Foldhash` represents an excellent choice that balances speed, quality, and reasonable security properties. It particularly shines as data sizes increase.
+
+The benchmarks confirm that the "right" hasher depends entirely on your specific workload.
+
+A HashMap storing user provided search queries has very different requirements than one tracking game entity positions,
+and choosing appropriately can yield order of magnitude performance improvements without sacrificing safety where it matters.
