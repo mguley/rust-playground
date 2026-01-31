@@ -4,19 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# The default hasher info (for educational comparison)
 rustc_version_runtime = "0.3"
 
 # Alternative hashers we'll explore
-rustc-hash = "2.1.1"     # FxHash - used in rustc compiler
+rustc-hash = "2.1.1"      # FxHash - used in rustc compiler
 ahash = "0.8.12"          # aHash - fast with DOS resistance
-foldhash = "0.2.0"       # Foldhash - modern, quality-focused
-twox-hash = "2.1.2"      # xxHash - established high-speed hasher
+foldhash = "0.2.0"        # Foldhash - modern, quality-focused
+twox-hash = "2.1.2"       # xxHash - established high-speed hasher
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }    # Alternative xxHash implementation
-nohash-hasher = "0.2.0"  # NoHash - for integer keys
+nohash-hasher = "0.2.0"   # NoHash - for integer keys
 
 # For generating random test data
 rand = "0.9.2"
 
 [dev-dependencies]
 criterion = "0.8.1"
+
+[[bench]]
+name = "hasher_benchmarks"
+harness = false
