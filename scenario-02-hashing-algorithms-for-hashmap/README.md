@@ -94,21 +94,7 @@ The quality of this hash function determines whether lookups stay O(1) or degrad
 The choice of hash function affects three critical aspects of HashMap performance: speed, security, and memory access patterns.
 
 **Speed variance is dramatic**. Different hashers can vary by 5-10x in throughput. For a HashMap with millions of
-operations, this difference translates directly to application performance. The table below shows approximate relative
-speeds (higher is faster) for hashing small keys:
-
-```
-╔═══════════════╦════════════════════╦═══════════════════════╗
-║    Hasher     ║  Relative Speed    ║       Best For        ║
-╠═══════════════╬════════════════════╬═══════════════════════╣
-║  NoHash       ║  ~10x baseline     ║  Integer keys only    ║
-║  FxHash       ║  ~5-8x baseline    ║  Compilers, trusted   ║
-║  aHash        ║  ~4-7x baseline    ║  General purpose      ║
-║  Foldhash     ║  ~4-6x baseline    ║  Modern alternative   ║
-║  xxHash       ║  ~3-5x baseline    ║  Large data, files    ║
-║  SipHash      ║  1x (baseline)     ║  Security-critical    ║
-╚═══════════════╩════════════════════╩═══════════════════════╝
-```
+operations, this difference translates directly to application performance. 
 
 **Security matters for untrusted input**. A cleverly crafted set of keys can cause hash collisions that turn your O(1)
 HashMap into an O(n) linked list. This is called a HashDoS attack, and it's why Rust defaults to SipHash.
@@ -1000,7 +986,7 @@ The key differences from SipHash:
 
 #### Key takeaways for FxHash
 
-| Property       | Value (for `rustc-hash` 2.1.1)                                                                                                         |
+| Property       | Value (`rustc-hash` 2.1.1)                                                                                                         |
 | -------------- |----------------------------------------------------------------------------------------------------------------------------------------|
 | Crate          | `rustc-hash`                                                                                                                           |
 | Core structure | fast polynomial hash over integer writes + rotate in `finish()`; `&[u8]`/`&str` are first compressed by a wyhash-inspired `hash_bytes` |
@@ -1502,7 +1488,7 @@ cargo run
 
 #### Key takeaways for aHash
 
-| Property    | Validated value (ahash 0.8.12)                                                                           |
+| Property    | Value (`ahash` 0.8.12)                                                                                     |
 | ----------- |----------------------------------------------------------------------------------------------------------|
 | Crate       | `ahash`                                                                                                  |
 | Algorithm   | Keyed hash; AES-rounds via AES-NI on supported x86/x86_64; folded-multiply-based fallback                |
@@ -1962,7 +1948,7 @@ cargo run
 
 #### Key takeaways for Foldhash
 
-| Property               | Recommended wording                                                                                                           |
+| Property               | Value (`foldhash` 0.2.0)                                                                                                             |
 | ---------------------- |-------------------------------------------------------------------------------------------------------------------------------|
 | Crate                  | `foldhash`                                                                                                                    |
 | Core mixing idea       | **Folded multiply**: multiply to 128-bit then XOR-fold high/low halves (used within a keyed hasher)                           |
@@ -2463,7 +2449,7 @@ cargo run
 
 #### Key takeaways for xxHash
 
-| Property    | Recommended value                                                                                        |
+| Property    | Value (`twox-hash` 2.1.2, `xxhash-rust` 0.8.15)                                                                |
 | ----------- |----------------------------------------------------------------------------------------------------------|
 | Crates      | `twox-hash`, `xxhash-rust`                                                                               |
 | Variants    | XXH32, XXH64, XXH3 (64-bit), XXH3/XXH128 (128-bit)                                                       |
@@ -3009,7 +2995,7 @@ cargo run
 
 #### Key takeaways for NoHash
 
-| Property          | Corrected value (nohash-hasher 0.2.0)                                                                                                                                       |
+| Property          | Value (`nohash-hasher` 0.2.0)                                                                                                                                                 |
 | ----------------- |-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Crate             | `nohash-hasher`                                                                                                                                                             |
 | Algorithm         | No hashing/mixing: uses the single integer value written via `write_{u8,u16,u32,u64,usize,i8,i16,i32,i64,isize}` as the hash output                                         |
@@ -4101,7 +4087,7 @@ cargo bench -- Large_Keys
 After running all the benchmarks, we can analyze the results to understand how each hasher performs across different workloads. 
 The following sections break down each benchmark and provide consolidated summary tables to guide your hasher selection.
 
-##### Raw hashing benchmark analysis
+#### Raw hashing benchmark analysis
 
 The raw hashing benchmark measures pure hash function throughput without any HashMap overhead. This isolates the cost of the hash computation itself across different input sizes.
 
@@ -4111,7 +4097,7 @@ This makes sense because `SipHash` and `xxHash64` have more complex initializati
 For **large keys (4096 bytes)**, the picture changes dramatically. `Foldhash` leads at 44.66 GiB/s, followed by `xxHash3` at 30.80 GiB/s. 
 `SipHash` remains the slowest at 5.94 GiB/s. This reveals that `Foldhash's` "folding multiply" technique scales exceptionally well with data size.
 
-##### Integer hashing benchmark analysis
+#### Integer hashing benchmark analysis
 
 This benchmark specifically tests the common case of hashing integer keys, which is important for entity IDs, database keys, and similar use cases.
 
@@ -4126,7 +4112,7 @@ This benchmark specifically tests the common case of hashing integer keys, which
 `NoHash's` dominance here is expected since it performs essentially no computation, just using the integer value directly. 
 `FxHash's` strong showing reflects its origins as a compiler hasher optimized for symbol table lookups (which are often integers or short strings).
 
-##### HashMap insert benchmark analysis
+#### HashMap insert benchmark analysis
 
 This measures the full cost of insertion including hashing, bucket lookup, and memory operations.
 
@@ -4151,7 +4137,7 @@ An interesting finding here is that `FxHash` actually beats `NoHash` for integer
 This likely reflects the fact that while `NoHash` has zero hashing cost, `FxHash's` simple multiply-xor operation produces slightly better bucket distribution,
 reducing collision-handling overhead in the HashMap itself.
 
-##### HashMap lookup benchmark analysis
+#### HashMap lookup benchmark analysis
 
 Lookup performance is often the most critical metric since many applications read far more than they write.
 
@@ -4175,7 +4161,7 @@ Lookup performance is often the most critical metric since many applications rea
 The lookup results show even more dramatic differences than insertion because lookup is a "pure" hash operation without memory allocation overhead. 
 `NoHash's` nearly 10× speedup for integer lookups demonstrates why it's so valuable for ECS systems and other integer-keyed workloads.
 
-##### Entry API benchmark analysis
+#### Entry API benchmark analysis
 
 The Entry API pattern (commonly used for counting and accumulation) shows similar trends.
 
@@ -4186,7 +4172,7 @@ The Entry API pattern (commonly used for counting and accumulation) shows simila
 | aHash    | 47.09 µs                 | **2.1× faster** |
 | SipHash  | 97.20 µs                 | 1× baseline     |
 
-##### Large keys benchmark analysis
+#### Large keys benchmark analysis
 
 Testing with longer string keys (~60 bytes each, simulating file paths or URLs).
 
@@ -4199,9 +4185,9 @@ Testing with longer string keys (~60 bytes each, simulating file paths or URLs).
 
 ---
 
-##### Summary table
+#### Summary table
 
-Here is the master summary table that consolidates all the benchmark findings:
+Here is the summary table that consolidates all the benchmark findings:
 
 | Hasher      | Small Key Hashing | Large Key Hashing | Integer HashMap | String HashMap | Security          | Best Use Case                    |
 |-------------|-------------------|-------------------|-----------------|----------------|-------------------|----------------------------------|
@@ -4212,7 +4198,7 @@ Here is the master summary table that consolidates all the benchmark findings:
 | **xxHash3** | ~10× faster       | ~5× faster        | N/A             | N/A            | Not secure      | Large data checksums, files      |
 | **NoHash**  | ~27× faster       | N/A               | ~5–10× faster   | N/A            | Not secure      | Integer keys only, ECS, caches   |
 
-##### Raw throughput summary (GiB/s)
+#### Raw throughput summary (GiB/s)
 
 | Hasher   | 8 bytes | 64 bytes | 256 bytes | 1024 bytes | 4096 bytes |
 |----------|---------|----------|-----------|------------|------------|
@@ -4225,7 +4211,7 @@ Here is the master summary table that consolidates all the benchmark findings:
 
 ---
 
-##### Key takeaways
+#### Key takeaways
 
 **For applications processing untrusted input** (web servers, APIs, anything exposed to the internet), stick with `SipHash` (the default) or `aHash`. 
 The performance difference is rarely noticeable in real applications, and the security protection is invaluable.
